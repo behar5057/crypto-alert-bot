@@ -2,13 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-بوت مراقبة العملات الرقمية - Crypto Alert Bot
-يعمل 24/7 على GitHub Actions
+بوت مراقبة العملات الرقمية - نسخة Render
+يعمل كـ Background Worker
 """
 
 import asyncio
 import aiohttp
 import os
+import sys
 from datetime import datetime
 from typing import Dict, Optional
 
@@ -19,7 +20,6 @@ from telegram.ext import (
 )
 
 # ==================== إعدادات البوت ====================
-# جلب التوكن من متغيرات البيئة في GitHub
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
 
@@ -134,7 +134,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         f"🤖 *بوت مراقبة العملات الرقمية*\n\n"
-        f"✅ البوت يعمل!\n\n"
+        f"✅ البوت يعمل على Render!\n\n"
         f"• نسبة التنبيه: {PRICE_CHANGE_THRESHOLD}%\n"
         f"• العملات: BTC, ETH\n\n"
         f"عند تغير السعر بنسبة {PRICE_CHANGE_THRESHOLD}% أو أكثر، ستتلقى تنبيهاً.",
@@ -209,12 +209,17 @@ async def price_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==================== التشغيل ====================
 
 async def main():
+    print("🤖 Starting Crypto Alert Bot on Render...")
+    
     if not TELEGRAM_TOKEN:
-        print("❌ خطأ: TELEGRAM_TOKEN غير موجود")
-        return
+        print("❌ ERROR: TELEGRAM_TOKEN environment variable not set!")
+        sys.exit(1)
     if not ADMIN_CHAT_ID:
-        print("❌ خطأ: ADMIN_CHAT_ID غير موجود")
-        return
+        print("❌ ERROR: ADMIN_CHAT_ID environment variable not set!")
+        sys.exit(1)
+    
+    print(f"✅ TOKEN loaded: {TELEGRAM_TOKEN[:10]}...")
+    print(f"✅ ADMIN_ID: {ADMIN_CHAT_ID}")
     
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     
@@ -225,17 +230,23 @@ async def main():
     # بدء مهمة المراقبة الدورية
     application.job_queue.run_repeating(check_prices, interval=CHECK_INTERVAL_SECONDS, first=5)
     
-    print(f"🤖 البوت يعمل! مراقبة العملات...")
-    print(f"📊 نسبة التنبيه: {PRICE_CHANGE_THRESHOLD}%")
+    print(f"🤖 Bot is running! Monitoring {len(CRYPTOCURRENCIES)} cryptocurrencies...")
+    print(f"📊 Alert threshold: {PRICE_CHANGE_THRESHOLD}%")
+    print(f"⏱️ Check interval: {CHECK_INTERVAL_SECONDS} seconds")
     
     await application.initialize()
     await application.start()
     await application.updater.start_polling()
     
+    # للحفاظ على التشغيل المستمر
     try:
-        await asyncio.Event().wait()
+        while True:
+            await asyncio.sleep(3600)  # نام لمدة ساعة ثم استمر
     except KeyboardInterrupt:
-        print("\n🛑 توقف البوت")
+        print("\n🛑 Bot stopped")
+        await application.updater.stop()
+        await application.stop()
+        await application.shutdown()
 
 if __name__ == "__main__":
     asyncio.run(main())
