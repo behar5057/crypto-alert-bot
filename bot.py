@@ -2,14 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-بوت مراقبة العملات الرقمية - نسخة Render
-يعمل كـ Background Worker
+بوت مراقبة العملات الرقمية - نسخة Render النهائية
 """
 
-import asyncio
-import aiohttp
 import os
 import sys
+import asyncio
+import aiohttp
+import logging
 from datetime import datetime
 from typing import Dict, Optional
 
@@ -18,6 +18,13 @@ from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, 
     ContextTypes
 )
+
+# ==================== إعدادات التسجيل ====================
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 # ==================== إعدادات البوت ====================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -38,6 +45,17 @@ VS_CURRENCY = "usd"
 # تخزين الأسعار
 price_history: Dict[str, Dict] = {}
 
+# ==================== التحقق من صحة الإعدادات ====================
+if not TELEGRAM_TOKEN:
+    logger.error("❌ TELEGRAM_TOKEN not set!")
+    sys.exit(1)
+
+if not ADMIN_CHAT_ID:
+    logger.error("❌ ADMIN_CHAT_ID not set!")
+    sys.exit(1)
+
+logger.info(f"✅ Bot starting with ADMIN_ID: {ADMIN_CHAT_ID}")
+
 # ==================== الدوال ====================
 
 def get_percentage_change(old_price: float, new_price: float) -> float:
@@ -51,15 +69,27 @@ async def fetch_crypto_prices() -> Optional[Dict]:
     
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url) as response:
+            async with session.get(url, timeout=30) as response:
                 if response.status == 200:
                     return await response.json()
                 else:
-                    print(f"API Error: {response.status}")
+                    logger.warning(f"API Error: {response.status}")
                     return None
     except Exception as e:
-        print(f"Network Error: {e}")
+        logger.warning(f"Network Error: {e}")
         return None
+
+async def send_test_message(application: Application):
+    """إرسال رسالة اختبار عند بدء التشغيل"""
+    try:
+        await application.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text="🤖 *البوت يعمل الآن!*\n\n✅ تم تشغيل بوت مراقبة العملات الرقمية بنجاح.\n\nسأقوم بمراقبة أسعار BTC و ETH وإرسال تنبيهات عند تغيرها.",
+            parse_mode="Markdown"
+        )
+        logger.info("✅ Test message sent to admin")
+    except Exception as e:
+        logger.error(f"Failed to send test message: {e}")
 
 def format_alert_message(coin_id: str, coin_symbol: str, old_price: float, 
                          new_price: float, percentage: float) -> str:
@@ -80,23 +110,13 @@ def format_alert_message(coin_id: str, coin_symbol: str, old_price: float,
 🕐 الوقت: {now}
 """
 
-async def send_alert(context: ContextTypes.DEFAULT_TYPE, coin_id: str, 
-                     coin_symbol: str, old_price: float, 
-                     new_price: float, percentage: float):
-    message = format_alert_message(coin_id, coin_symbol, old_price, new_price, percentage)
-    await context.bot.send_message(
-        chat_id=ADMIN_CHAT_ID,
-        text=message,
-        parse_mode="Markdown"
-    )
-    print(f"[{datetime.now()}] ALERT: {coin_symbol} changed by {percentage:.2f}%")
-
 async def check_prices(context: ContextTypes.DEFAULT_TYPE):
-    print(f"[{datetime.now()}] Checking prices...")
+    """فحص الأسعار وإرسال تنبيهات"""
+    logger.info("Checking prices...")
     
     prices_data = await fetch_crypto_prices()
     if not prices_data:
-        print("Failed to fetch prices")
+        logger.warning("Failed to fetch prices")
         return
     
     for coin_id, coin_symbol in CRYPTOCURRENCIES.items():
@@ -110,13 +130,27 @@ async def check_prices(context: ContextTypes.DEFAULT_TYPE):
             percentage = get_percentage_change(old_price, current_price)
             
             if abs(percentage) >= PRICE_CHANGE_THRESHOLD:
-                await send_alert(context, coin_id, coin_symbol, old_price, current_price, percentage)
+                message = format_alert_message(coin_id, coin_symbol, old_price, current_price, percentage)
+                try:
+                    await context.bot.send_message(
+                        chat_id=ADMIN_CHAT_ID,
+                        text=message,
+                        parse_mode="Markdown"
+                    )
+                    logger.info(f"ALERT sent for {coin_symbol}: {percentage:.2f}%")
+                except Exception as e:
+                    logger.error(f"Failed to send alert: {e}")
+                
+                # تحديث السعر بعد إرسال التنبيه
                 price_history[coin_id] = {"price": current_price, "timestamp": datetime.now()}
             else:
+                # تحديث السعر فقط
                 price_history[coin_id]["price"] = current_price
+                price_history[coin_id]["timestamp"] = datetime.now()
         else:
+            # أول مرة
             price_history[coin_id] = {"price": current_price, "timestamp": datetime.now()}
-            print(f"Initialized {coin_symbol} at ${current_price:,.2f}")
+            logger.info(f"Initialized {coin_symbol} at ${current_price:,.2f}")
 
 # ==================== أوامر البوت ====================
 
@@ -136,7 +170,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🤖 *بوت مراقبة العملات الرقمية*\n\n"
         f"✅ البوت يعمل على Render!\n\n"
         f"• نسبة التنبيه: {PRICE_CHANGE_THRESHOLD}%\n"
-        f"• العملات: BTC, ETH\n\n"
+        f"• العملات: BTC, ETH\n"
+        f"• فترة الفحص: كل {CHECK_INTERVAL_SECONDS} ثانية\n\n"
         f"عند تغير السعر بنسبة {PRICE_CHANGE_THRESHOLD}% أو أكثر، ستتلقى تنبيهاً.",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
@@ -162,7 +197,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     message += f"• *{coin_symbol}*: ${price:,.2f} {emoji} ({change:+.2f}%)\n"
             await query.edit_message_text(message, parse_mode="Markdown")
         else:
-            await query.edit_message_text("❌ تعذر جلب الأسعار.")
+            await query.edit_message_text("❌ تعذر جلب الأسعار حالياً.")
     
     elif query.data == "status":
         message = "📈 *حالة المراقبة:*\n\n"
@@ -171,10 +206,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 price = price_history[coin_id]["price"]
                 last_check = price_history[coin_id]["timestamp"].strftime("%H:%M:%S")
                 message += f"• *{coin_symbol}*: ${price:,.2f} (آخر تحديث: {last_check})\n"
+        message += f"\n⚙️ نسبة التنبيه الحالية: {PRICE_CHANGE_THRESHOLD}%"
         await query.edit_message_text(message, parse_mode="Markdown")
     
     elif query.data == "change_threshold":
-        global PRICE_CHANGE_THRESHOLD
         keyboard = [
             [InlineKeyboardButton("2%", callback_data="set_2"), 
              InlineKeyboardButton("3%", callback_data="set_3"),
@@ -188,9 +223,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
     elif query.data.startswith("set_"):
+        global PRICE_CHANGE_THRESHOLD
         new_threshold = float(query.data.replace("set_", ""))
         PRICE_CHANGE_THRESHOLD = new_threshold
-        await query.edit_message_text(f"✅ تم تعديل النسبة إلى {new_threshold}%")
+        await query.edit_message_text(f"✅ تم تعديل النسبة إلى {new_threshold}%\n\nسأقوم بإرسال تنبيهات عند تغير السعر بنسبة {new_threshold}% أو أكثر.")
 
 async def price_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != ADMIN_CHAT_ID:
@@ -201,52 +237,74 @@ async def price_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for coin_id, coin_symbol in CRYPTOCURRENCIES.items():
             if coin_id in prices:
                 price = prices[coin_id][VS_CURRENCY]
-                message += f"• *{coin_symbol}*: ${price:,.2f}\n"
+                change = prices[coin_id].get(f"{VS_CURRENCY}_24h_change", 0)
+                emoji = "📈" if change >= 0 else "📉"
+                message += f"• *{coin_symbol}*: ${price:,.2f} {emoji} ({change:+.2f}%)\n"
         await update.message.reply_text(message, parse_mode="Markdown")
     else:
-        await update.message.reply_text("❌ تعذر جلب الأسعار.")
+        await update.message.reply_text("❌ تعذر جلب الأسعار حالياً.")
 
-# ==================== التشغيل ====================
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_user.id) != ADMIN_CHAT_ID:
+        return
+    await update.message.reply_text(
+        "📖 *مساعدة البوت*\n\n"
+        "/start - عرض القائمة الرئيسية\n"
+        "/price - عرض الأسعار الحالية\n"
+        "/help - عرض هذه المساعدة\n\n"
+        "البوت يراقب الأسعار تلقائياً ويرسل تنبيهات عند التغير.",
+        parse_mode="Markdown"
+    )
+
+# ==================== التشغيل الرئيسي ====================
 
 async def main():
-    print("🤖 Starting Crypto Alert Bot on Render...")
+    """الوظيفة الرئيسية"""
+    logger.info("🤖 Starting Crypto Alert Bot on Render...")
     
-    if not TELEGRAM_TOKEN:
-        print("❌ ERROR: TELEGRAM_TOKEN environment variable not set!")
-        sys.exit(1)
-    if not ADMIN_CHAT_ID:
-        print("❌ ERROR: ADMIN_CHAT_ID environment variable not set!")
-        sys.exit(1)
-    
-    print(f"✅ TOKEN loaded: {TELEGRAM_TOKEN[:10]}...")
-    print(f"✅ ADMIN_ID: {ADMIN_CHAT_ID}")
-    
+    # إنشاء التطبيق
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     
+    # إضافة المعالجات
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("price", price_command))
+    application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CallbackQueryHandler(button_handler))
     
-    # بدء مهمة المراقبة الدورية
-    application.job_queue.run_repeating(check_prices, interval=CHECK_INTERVAL_SECONDS, first=5)
+    # إضافة مهمة المراقبة الدورية
+    application.job_queue.run_repeating(check_prices, interval=CHECK_INTERVAL_SECONDS, first=10)
     
-    print(f"🤖 Bot is running! Monitoring {len(CRYPTOCURRENCIES)} cryptocurrencies...")
-    print(f"📊 Alert threshold: {PRICE_CHANGE_THRESHOLD}%")
-    print(f"⏱️ Check interval: {CHECK_INTERVAL_SECONDS} seconds")
-    
+    # بدء التطبيق
     await application.initialize()
     await application.start()
-    await application.updater.start_polling()
     
-    # للحفاظ على التشغيل المستمر
+    # بدء polling
+    await application.updater.start_polling()
+    logger.info("✅ Bot polling started successfully!")
+    
+    # إرسال رسالة ترحيب بعد بدء التشغيل مباشرة
+    await send_test_message(application)
+    
+    logger.info(f"📊 Monitoring: {', '.join(CRYPTOCURRENCIES.values())}")
+    logger.info(f"⚙️ Alert threshold: {PRICE_CHANGE_THRESHOLD}%")
+    logger.info(f"⏱️ Check interval: {CHECK_INTERVAL_SECONDS}s")
+    
+    # البقاء قيد التشغيل
     try:
-        while True:
-            await asyncio.sleep(3600)  # نام لمدة ساعة ثم استمر
+        # استخدم asyncio.Event بدلاً من while True
+        stop_event = asyncio.Event()
+        await stop_event.wait()
     except KeyboardInterrupt:
-        print("\n🛑 Bot stopped")
+        logger.info("🛑 Bot stopped by user")
         await application.updater.stop()
         await application.stop()
         await application.shutdown()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot terminated")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+        sys.exit(1)
