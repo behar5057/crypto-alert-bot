@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-بوت مراقبة العملات الرقمية - نسخة Render النهائية
+بوت مراقبة العملات الرقمية - نسخة Render النهائية (مصححة)
 """
 
 import os
@@ -112,6 +112,8 @@ def format_alert_message(coin_id: str, coin_symbol: str, old_price: float,
 
 async def check_prices(context: ContextTypes.DEFAULT_TYPE):
     """فحص الأسعار وإرسال تنبيهات"""
+    global PRICE_CHANGE_THRESHOLD
+    
     logger.info("Checking prices...")
     
     prices_data = await fetch_crypto_prices()
@@ -155,6 +157,8 @@ async def check_prices(context: ContextTypes.DEFAULT_TYPE):
 # ==================== أوامر البوت ====================
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global PRICE_CHANGE_THRESHOLD
+    
     user_id = update.effective_user.id
     if str(user_id) != ADMIN_CHAT_ID:
         await update.message.reply_text("⚠️ هذا البوت خاص بصاحبه فقط.")
@@ -178,6 +182,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global PRICE_CHANGE_THRESHOLD
+    
     query = update.callback_query
     await query.answer()
     
@@ -223,7 +229,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
     elif query.data.startswith("set_"):
-        global PRICE_CHANGE_THRESHOLD
         new_threshold = float(query.data.replace("set_", ""))
         PRICE_CHANGE_THRESHOLD = new_threshold
         await query.edit_message_text(f"✅ تم تعديل النسبة إلى {new_threshold}%\n\nسأقوم بإرسال تنبيهات عند تغير السعر بنسبة {new_threshold}% أو أكثر.")
