@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-بوت مراقبة العملات الرقمية - نسخة Render النهائية (مصححة)
+بوت مراقبة العملات الرقمية - نسخة Webhooks لـ Render Web Service
+يعمل حتى مع الخطة المجانية
 """
 
 import os
@@ -12,11 +13,13 @@ import aiohttp
 import logging
 from datetime import datetime
 from typing import Dict, Optional
+from flask import Flask, request, jsonify
+from threading import Thread
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, 
-    ContextTypes
+    ContextTypes, webhooks
 )
 
 # ==================== إعدادات التسجيل ====================
@@ -29,6 +32,7 @@ logger = logging.getLogger(__name__)
 # ==================== إعدادات البوت ====================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
+RENDER_URL = os.environ.get("RENDER_URL", "https://crypto-alert-bot.onrender.com")
 
 # إعدادات المراقبة
 CHECK_INTERVAL_SECONDS = 60
@@ -55,6 +59,36 @@ if not ADMIN_CHAT_ID:
     sys.exit(1)
 
 logger.info(f"✅ Bot starting with ADMIN_ID: {ADMIN_CHAT_ID}")
+logger.info(f"✅ Webhook URL: {RENDER_URL}")
+
+# إنشاء التطبيق
+application = Application.builder().token(TELEGRAM_TOKEN).build()
+bot = Bot(token=TELEGRAM_TOKEN)
+
+# ==================== Flask Web Server ====================
+flask_app = Flask(__name__)
+
+@flask_app.route('/webhook', methods=['POST'])
+async def webhook():
+    """استقبال التحديثات من تلغرام"""
+    try:
+        update_data = request.get_json()
+        update = Update.de_json(update_data, application.bot)
+        await application.process_update(update)
+        return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return jsonify({"status": "error"}), 500
+
+@flask_app.route('/health', methods=['GET'])
+def health():
+    """نقطة صحية لـ Render"""
+    return jsonify({"status": "alive", "time": datetime.now().isoformat()}), 200
+
+@flask_app.route('/', methods=['GET'])
+def index():
+    """الصفحة الرئيسية"""
+    return "🤖 Crypto Alert Bot is running!", 200
 
 # ==================== الدوال ====================
 
@@ -79,18 +113,6 @@ async def fetch_crypto_prices() -> Optional[Dict]:
         logger.warning(f"Network Error: {e}")
         return None
 
-async def send_test_message(application: Application):
-    """إرسال رسالة اختبار عند بدء التشغيل"""
-    try:
-        await application.bot.send_message(
-            chat_id=ADMIN_CHAT_ID,
-            text="🤖 *البوت يعمل الآن!*\n\n✅ تم تشغيل بوت مراقبة العملات الرقمية بنجاح.\n\nسأقوم بمراقبة أسعار BTC و ETH وإرسال تنبيهات عند تغيرها.",
-            parse_mode="Markdown"
-        )
-        logger.info("✅ Test message sent to admin")
-    except Exception as e:
-        logger.error(f"Failed to send test message: {e}")
-
 def format_alert_message(coin_id: str, coin_symbol: str, old_price: float, 
                          new_price: float, percentage: float) -> str:
     direction = "🟢 صعود" if percentage > 0 else "🔴 هبوط"
@@ -110,8 +132,8 @@ def format_alert_message(coin_id: str, coin_symbol: str, old_price: float,
 🕐 الوقت: {now}
 """
 
-async def check_prices(context: ContextTypes.DEFAULT_TYPE):
-    """فحص الأسعار وإرسال تنبيهات"""
+async def check_and_send_alerts():
+    """فحص الأسعار وإرسال تنبيهات (تعمل في الخلفية)"""
     global PRICE_CHANGE_THRESHOLD
     
     logger.info("Checking prices...")
@@ -134,7 +156,7 @@ async def check_prices(context: ContextTypes.DEFAULT_TYPE):
             if abs(percentage) >= PRICE_CHANGE_THRESHOLD:
                 message = format_alert_message(coin_id, coin_symbol, old_price, current_price, percentage)
                 try:
-                    await context.bot.send_message(
+                    await bot.send_message(
                         chat_id=ADMIN_CHAT_ID,
                         text=message,
                         parse_mode="Markdown"
@@ -143,16 +165,19 @@ async def check_prices(context: ContextTypes.DEFAULT_TYPE):
                 except Exception as e:
                     logger.error(f"Failed to send alert: {e}")
                 
-                # تحديث السعر بعد إرسال التنبيه
                 price_history[coin_id] = {"price": current_price, "timestamp": datetime.now()}
             else:
-                # تحديث السعر فقط
                 price_history[coin_id]["price"] = current_price
                 price_history[coin_id]["timestamp"] = datetime.now()
         else:
-            # أول مرة
             price_history[coin_id] = {"price": current_price, "timestamp": datetime.now()}
             logger.info(f"Initialized {coin_symbol} at ${current_price:,.2f}")
+
+async def periodic_check():
+    """تشغيل الفحص الدوري"""
+    while True:
+        await check_and_send_alerts()
+        await asyncio.sleep(CHECK_INTERVAL_SECONDS)
 
 # ==================== أوامر البوت ====================
 
@@ -172,7 +197,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         f"🤖 *بوت مراقبة العملات الرقمية*\n\n"
-        f"✅ البوت يعمل على Render!\n\n"
+        f"✅ البوت يعمل على Render (Web Service مجاني)!\n\n"
         f"• نسبة التنبيه: {PRICE_CHANGE_THRESHOLD}%\n"
         f"• العملات: BTC, ETH\n"
         f"• فترة الفحص: كل {CHECK_INTERVAL_SECONDS} ثانية\n\n"
@@ -231,7 +256,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data.startswith("set_"):
         new_threshold = float(query.data.replace("set_", ""))
         PRICE_CHANGE_THRESHOLD = new_threshold
-        await query.edit_message_text(f"✅ تم تعديل النسبة إلى {new_threshold}%\n\nسأقوم بإرسال تنبيهات عند تغير السعر بنسبة {new_threshold}% أو أكثر.")
+        await query.edit_message_text(f"✅ تم تعديل النسبة إلى {new_threshold}%")
 
 async def price_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != ADMIN_CHAT_ID:
@@ -242,74 +267,60 @@ async def price_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for coin_id, coin_symbol in CRYPTOCURRENCIES.items():
             if coin_id in prices:
                 price = prices[coin_id][VS_CURRENCY]
-                change = prices[coin_id].get(f"{VS_CURRENCY}_24h_change", 0)
-                emoji = "📈" if change >= 0 else "📉"
-                message += f"• *{coin_symbol}*: ${price:,.2f} {emoji} ({change:+.2f}%)\n"
+                message += f"• *{coin_symbol}*: ${price:,.2f}\n"
         await update.message.reply_text(message, parse_mode="Markdown")
     else:
-        await update.message.reply_text("❌ تعذر جلب الأسعار حالياً.")
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.effective_user.id) != ADMIN_CHAT_ID:
-        return
-    await update.message.reply_text(
-        "📖 *مساعدة البوت*\n\n"
-        "/start - عرض القائمة الرئيسية\n"
-        "/price - عرض الأسعار الحالية\n"
-        "/help - عرض هذه المساعدة\n\n"
-        "البوت يراقب الأسعار تلقائياً ويرسل تنبيهات عند التغير.",
-        parse_mode="Markdown"
-    )
+        await update.message.reply_text("❌ تعذر جلب الأسعار.")
 
 # ==================== التشغيل الرئيسي ====================
 
+def run_flask():
+    """تشغيل خادم Flask"""
+    flask_app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+
+async def setup_webhook():
+    """إعداد webhook في تلغرام"""
+    webhook_url = f"{RENDER_URL}/webhook"
+    try:
+        # إزالة أي webhook قديم
+        await bot.delete_webhook()
+        # تعيين webhook جديد
+        await bot.set_webhook(webhook_url)
+        logger.info(f"✅ Webhook set to: {webhook_url}")
+        
+        # إرسال رسالة ترحيب
+        await bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text="🤖 *البوت يعمل الآن على Render Web Service!*\n\n✅ تم إعداد Webhook بنجاح.\n\nسأقوم بمراقبة أسعار BTC و ETH.",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"Failed to set webhook: {e}")
+
 async def main():
     """الوظيفة الرئيسية"""
-    logger.info("🤖 Starting Crypto Alert Bot on Render...")
+    logger.info("🤖 Starting Crypto Alert Bot on Render Web Service...")
     
-    # إنشاء التطبيق
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-    
-    # إضافة المعالجات
+    # إضافة معالجات الأوامر
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("price", price_command))
-    application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CallbackQueryHandler(button_handler))
     
-    # إضافة مهمة المراقبة الدورية
-    application.job_queue.run_repeating(check_prices, interval=CHECK_INTERVAL_SECONDS, first=10)
+    # إعداد webhook
+    await setup_webhook()
     
-    # بدء التطبيق
-    await application.initialize()
-    await application.start()
-    
-    # بدء polling
-    await application.updater.start_polling()
-    logger.info("✅ Bot polling started successfully!")
-    
-    # إرسال رسالة ترحيب بعد بدء التشغيل مباشرة
-    await send_test_message(application)
+    # بدء الفحص الدوري في الخلفية
+    asyncio.create_task(periodic_check())
     
     logger.info(f"📊 Monitoring: {', '.join(CRYPTOCURRENCIES.values())}")
     logger.info(f"⚙️ Alert threshold: {PRICE_CHANGE_THRESHOLD}%")
     logger.info(f"⏱️ Check interval: {CHECK_INTERVAL_SECONDS}s")
     
-    # البقاء قيد التشغيل
-    try:
-        # استخدم asyncio.Event بدلاً من while True
-        stop_event = asyncio.Event()
-        await stop_event.wait()
-    except KeyboardInterrupt:
-        logger.info("🛑 Bot stopped by user")
-        await application.updater.stop()
-        await application.stop()
-        await application.shutdown()
+    # تشغيل Flask في thread منفصل
+    flask_thread = Thread(target=run_flask)
+    flask_thread.start()
+    
+    logger.info("✅ Bot is running!")
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Bot terminated")
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
-        sys.exit(1)
+    asyncio.run(main())
